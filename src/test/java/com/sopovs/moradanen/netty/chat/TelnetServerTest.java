@@ -1,158 +1,188 @@
 package com.sopovs.moradanen.netty.chat;
 
-import static com.sopovs.moradanen.netty.chat.TelnetServerHandler.CHAT_IS_FULL_MESSAGE;
-import static com.sopovs.moradanen.netty.chat.TelnetServerHandler.WRONG_PASSWORD_MESSAGE;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
-
-import java.net.InetSocketAddress;
-import java.net.SocketAddress;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.List;
-import java.util.concurrent.ConcurrentLinkedQueue;
-
 import io.netty.bootstrap.Bootstrap;
+import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.*;
+import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
+import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.codec.DelimiterBasedFrameDecoder;
 import io.netty.handler.codec.Delimiters;
 import io.netty.handler.codec.string.StringDecoder;
 import io.netty.handler.codec.string.StringEncoder;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.RepeatedTest;
+import org.junit.jupiter.api.Test;
 
-import io.netty.bootstrap.ServerBootstrap;
-import io.netty.channel.nio.NioEventLoopGroup;
-import io.netty.channel.socket.nio.NioServerSocketChannel;
+import java.net.InetSocketAddress;
+import java.net.SocketAddress;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 
-public final class TelnetServerTest {
-	private EventLoopGroup serverBossGroup;
-	private EventLoopGroup serverWorkerGroup;
-	private SocketAddress localAddress;
+import static com.sopovs.moradanen.netty.chat.TelnetServerHandler.*;
+import static org.junit.jupiter.api.Assertions.*;
 
-	@Before
-	public void setup() throws Exception {
-		serverBossGroup = new NioEventLoopGroup(1);
-		serverWorkerGroup = new NioEventLoopGroup();
-		ServerBootstrap serverBootstrap = new ServerBootstrap();
-		serverBootstrap.group(serverBossGroup, serverWorkerGroup)
-				.channel(NioServerSocketChannel.class)
-				.childHandler(new TelnetServerInitializer());
 
-		localAddress = serverBootstrap.bind(0).sync().channel().localAddress();
-		assertNotNull(localAddress);
-	}
+final class TelnetServerTest {
+    private EventLoopGroup serverBossGroup;
+    private EventLoopGroup serverWorkerGroup;
+    private SocketAddress localAddress;
 
-	private int getPort() {
-		return ((InetSocketAddress) localAddress).getPort();
-	}
+    @BeforeEach
+    void setup() throws Exception {
+        serverBossGroup = new NioEventLoopGroup(1);
+        serverWorkerGroup = new NioEventLoopGroup();
+        ServerBootstrap serverBootstrap = new ServerBootstrap();
+        serverBootstrap.group(serverBossGroup, serverWorkerGroup)
+                .channel(NioServerSocketChannel.class)
+                .childHandler(new TelnetServerInitializer());
 
-	@After
-	public void teardown() {
-		serverBossGroup.shutdownGracefully();
-		serverWorkerGroup.shutdownGracefully();
-	}
+        localAddress = serverBootstrap.bind(0).sync().channel().localAddress();
+        assertNotNull(localAddress);
+    }
 
-	@Test
-	public void test() throws Exception {
-		Collection<String> responses = TelnetServerTester.test(getPort());
-		assertEquals(12, responses.stream().filter("Bye!"::equals).count());
-		assertEquals(1, responses.stream().filter(WRONG_PASSWORD_MESSAGE::equals).count());
-		assertEquals(1, responses.stream().filter(CHAT_IS_FULL_MESSAGE::equals).count());
-		// Каждый из 10 клиентов должен получить все 10 сообщений - либо как
-		// историю, либо как нормальные сообщения после того, как подключился
-		assertEquals(100, responses.stream().filter(r -> r.contains("foobar")).count());
+    private int getPort() {
+        return ((InetSocketAddress) localAddress).getPort();
+    }
 
-	}
+    @AfterEach
+    void teardown() {
+        serverBossGroup.shutdownGracefully();
+        serverWorkerGroup.shutdownGracefully();
+    }
 
-}
+    @Test
+    void testSimple() throws Exception {
 
-final class TelnetServerTester {
+        BlockingQueue<String> responsesQueue = new LinkedBlockingQueue<>();
 
-	static Collection<String> test(int port) throws InterruptedException {
-		ConcurrentLinkedQueue<String> responces = new ConcurrentLinkedQueue<>();
+        EventLoopGroup clientGroup = new NioEventLoopGroup();
+        try {
+            Bootstrap b = new Bootstrap();
+            b.group(clientGroup)
+                    .channel(NioSocketChannel.class)
+                    .handler(new TelnetClientInitializer(responsesQueue));
 
-		EventLoopGroup clientGroup = new NioEventLoopGroup();
-		try {
-			Bootstrap b = new Bootstrap();
-			b.group(clientGroup)
-					.channel(NioSocketChannel.class)
-					.handler(new TelnetClientInitializer(responces));
+            List<ChannelFuture> futures = new ArrayList<>();
+            for (int i = 0; i < 10; i++) {
+                futures.add(
+                        b.connect("127.0.0.1", getPort())
+                                .await().channel().writeAndFlush("/login foo" + i + " bar" + i + "\n")
+                                .channel().writeAndFlush("/join foo\n")
+                                .await().channel().writeAndFlush("foobar" + i + "\n"));
+            }
 
-			List<ChannelFuture> futures = new ArrayList<>();
-			for (int i = 1; i <= 10; i++) {
-				futures.add(
-						b.connect("127.0.0.1", port)
-								.await().channel().writeAndFlush("/login foo" + i + " bar" + i + "\n")
-								.channel().writeAndFlush("/join foo\n")
-								.await().channel().writeAndFlush("foobar" + i + "\n"));
-			}
+            for (int i = 0; i < 100; i++) {
+                assertTrue(responsesQueue.take().contains("foobar"));
+            }
 
-			b.connect("127.0.0.1", port)
-					.await().channel().writeAndFlush("/login foo1 wrongpass\n")
-					.await().channel().writeAndFlush("/leave\n")
-					.channel().closeFuture().await();
+            b.connect("127.0.0.1", getPort())
+                    .await().channel().writeAndFlush("/login foo0 wrongpass\n")
+                    .await().channel().writeAndFlush("/leave\n")
+                    .channel().closeFuture().await();
 
-			b.connect("127.0.0.1", port)
-					.await().channel().writeAndFlush("/login foo12 foo12\n")
-					.await().channel().writeAndFlush("/join foo\n")
-					.await().channel().writeAndFlush("/leave\n")
-					.channel().closeFuture().await();
+            assertEquals(WRONG_PASSWORD_MESSAGE, responsesQueue.take());
+            assertEquals(BYE_MESSAGE, responsesQueue.take());
 
-			for (ChannelFuture future : futures) {
-				future
-						.await().channel().writeAndFlush("/leave\n")
-						.channel().closeFuture().await();
-			}
+            b.connect("127.0.0.1", getPort())
+                    .await().channel().writeAndFlush("/login foo12 foo12\n")
+                    .await().channel().writeAndFlush("/join foo\n")
+                    .await().channel().writeAndFlush("/leave\n")
+                    .channel().closeFuture().await();
 
-			return responces;
+            assertEquals(CHAT_IS_FULL_MESSAGE, responsesQueue.take());
+            assertEquals(BYE_MESSAGE, responsesQueue.take());
 
-		} finally {
-			clientGroup.shutdownGracefully();
-		}
-	}
+
+            for (ChannelFuture future : futures) {
+                future
+                        .await().channel().writeAndFlush("/leave\n")
+                        .channel().closeFuture().await();
+            }
+
+            for (int i = 0; i < 10; i++) {
+                assertEquals(BYE_MESSAGE, responsesQueue.take());
+            }
+        } finally {
+            clientGroup.shutdownGracefully();
+        }
+    }
+
+    @RepeatedTest(10)
+    void testChatSize() throws Exception {
+        BlockingQueue<String> responses = new LinkedBlockingQueue<>();
+        EventLoopGroup clientGroup = new NioEventLoopGroup();
+        try {
+            Bootstrap b = new Bootstrap();
+            TelnetClientInitializer clientInitializer = new TelnetClientInitializer(responses);
+            b.group(clientGroup)
+                    .channel(NioSocketChannel.class)
+                    .handler(clientInitializer);
+
+            List<ChannelFuture> futures = new ArrayList<>();
+            for (int i = 0; i < Chat.CHAT_ROOM_CAPACITY * 2; i++) {
+                futures.add(
+                        b.connect("127.0.0.1", getPort())
+                                .await().channel().writeAndFlush("/login foo" + i + " bar" + i + "\n")
+                                .channel().writeAndFlush("/join foo\n")
+                );
+            }
+
+            for (int i = 0; i < Chat.CHAT_ROOM_CAPACITY; i++) {
+                assertEquals(CHAT_IS_FULL_MESSAGE, responses.take());
+            }
+            for (ChannelFuture future : futures) {
+                future.channel().writeAndFlush("/leave\n")
+                        .channel().closeFuture().await();
+            }
+        } finally {
+            clientGroup.shutdownGracefully();
+        }
+    }
+
 }
 
 final class TelnetClientInitializer extends ChannelInitializer<SocketChannel> {
 
-	private static final StringDecoder DECODER = new StringDecoder();
-	private static final StringEncoder ENCODER = new StringEncoder();
-	private final TelnetClientHandler clientHandler;
+    private static final StringDecoder DECODER = new StringDecoder();
+    private static final StringEncoder ENCODER = new StringEncoder();
+    private final TelnetClientHandler clientHandler;
 
-	TelnetClientInitializer(Collection<String> responces) {
-		clientHandler = new TelnetClientHandler(responces);
-	}
+    TelnetClientInitializer(BlockingQueue<String> responses) {
+        clientHandler = new TelnetClientHandler(responses);
+    }
 
-	@Override
-	public void initChannel(SocketChannel ch) {
-		ChannelPipeline pipeline = ch.pipeline();
-		pipeline.addLast(new DelimiterBasedFrameDecoder(8192, Delimiters.lineDelimiter()));
-		pipeline.addLast(DECODER);
-		pipeline.addLast(ENCODER);
-		pipeline.addLast(clientHandler);
-	}
+    @Override
+    public void initChannel(SocketChannel ch) {
+        ChannelPipeline pipeline = ch.pipeline();
+        pipeline.addLast(new DelimiterBasedFrameDecoder(8192, Delimiters.lineDelimiter()));
+        pipeline.addLast(DECODER);
+        pipeline.addLast(ENCODER);
+        pipeline.addLast(clientHandler);
+    }
 }
 
 @ChannelHandler.Sharable
 final class TelnetClientHandler extends SimpleChannelInboundHandler<String> {
-	private final Collection<String> responses;
+    private final BlockingQueue<String> responses;
 
-	TelnetClientHandler(Collection<String> responses) {
-		this.responses = responses;
-	}
+    TelnetClientHandler(BlockingQueue<String> responses) {
+        this.responses = responses;
+    }
 
-	@Override
-	protected void channelRead0(ChannelHandlerContext ctx, String msg) throws Exception {
-		responses.add(msg);
-	}
+    @Override
+    protected void channelRead0(ChannelHandlerContext ctx, String msg) throws Exception {
+        responses.add(msg);
+    }
 
-	@Override
-	public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-		cause.printStackTrace();
-		ctx.close();
-	}
+    @Override
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+        cause.printStackTrace();
+        ctx.close();
+    }
 }
 

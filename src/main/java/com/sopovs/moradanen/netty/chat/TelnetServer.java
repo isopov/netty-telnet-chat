@@ -1,30 +1,11 @@
 package com.sopovs.moradanen.netty.chat;
 
-import java.security.NoSuchAlgorithmException;
-import java.security.spec.InvalidKeySpecException;
-import java.security.spec.KeySpec;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Queue;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.stream.Collectors;
-
-import javax.crypto.SecretKeyFactory;
-import javax.crypto.spec.PBEKeySpec;
-
 import com.google.common.base.Splitter;
 import com.google.common.collect.EvictingQueue;
 import com.google.common.collect.Queues;
-
 import io.netty.bootstrap.ServerBootstrap;
-import io.netty.channel.Channel;
-import io.netty.channel.ChannelFutureListener;
+import io.netty.channel.*;
 import io.netty.channel.ChannelHandler.Sharable;
-import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInitializer;
-import io.netty.channel.ChannelPipeline;
-import io.netty.channel.EventLoopGroup;
-import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.channel.group.ChannelGroup;
 import io.netty.channel.group.DefaultChannelGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
@@ -40,6 +21,17 @@ import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.GlobalEventExecutor;
 import io.netty.util.internal.ThreadLocalRandom;
 
+import javax.crypto.SecretKeyFactory;
+import javax.crypto.spec.PBEKeySpec;
+import java.security.NoSuchAlgorithmException;
+import java.security.spec.InvalidKeySpecException;
+import java.security.spec.KeySpec;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
+
 public final class TelnetServer {
 
 	private static final int PORT = 4567;
@@ -47,8 +39,8 @@ public final class TelnetServer {
 	public static void main(String[] args) throws Exception {
 		EventLoopGroup bossGroup = new NioEventLoopGroup(1);
 		EventLoopGroup workerGroup = new NioEventLoopGroup();
-		try (AutoCloseable bossGroupClose = bossGroup::shutdownGracefully;
-				AutoCloseable woorkerGroupClose = workerGroup::shutdownGracefully) {
+		try (AutoCloseable ignored = bossGroup::shutdownGracefully;
+			 AutoCloseable ignored2 = workerGroup::shutdownGracefully) {
 			ServerBootstrap b = new ServerBootstrap();
 			b.group(bossGroup, workerGroup).channel(NioServerSocketChannel.class)
 					.handler(new LoggingHandler(LogLevel.INFO)).childHandler(new TelnetServerInitializer());
@@ -62,6 +54,7 @@ public final class TelnetServer {
 final class TelnetServerHandler extends SimpleChannelInboundHandler<String> {
 	static final String WRONG_PASSWORD_MESSAGE = "Wrong password!";
 	static final String CHAT_IS_FULL_MESSAGE = "Chat is full!";
+	static final String BYE_MESSAGE = "Bye!";
 	private static final String LOGIN_MESSAGE = "Please login!";
 	private static final String JOIN_CHAT_MESSAGE = "Please join some chat!";
 	static final AttributeKey<String> USER_NAME = AttributeKey.valueOf("username");
@@ -89,14 +82,14 @@ final class TelnetServerHandler extends SimpleChannelInboundHandler<String> {
 	private void handleChatCommand(ChannelHandlerContext ctx, String request, String username, String chatName) {
 		if ("/leave".equals(request)) {
 			leaveChatIfAny(ctx, chatName);
-			ctx.write("Bye!\n").addListener(ChannelFutureListener.CLOSE);
+			ctx.write(BYE_MESSAGE + '\n').addListener(ChannelFutureListener.CLOSE);
 		} else if (username == null && !request.startsWith("/login ")) {
-			ctx.write(LOGIN_MESSAGE + "\n");
+			ctx.write(LOGIN_MESSAGE + '\n');
 		} else if (request.startsWith("/login ")) {
 			leaveChatIfAny(ctx, chatName);
 			handleLogin(ctx, request);
 		} else if (chatName == null && !request.startsWith("/join ")) {
-			ctx.write(JOIN_CHAT_MESSAGE + "\n");
+			ctx.write(JOIN_CHAT_MESSAGE + '\n');
 		} else if (request.startsWith("/join ")) {
 			handleJoin(ctx, request, chatName);
 		} else if ("/users".equals(request)) {
@@ -185,6 +178,8 @@ final class Chat {
 	private static final int CHAT_HISTORY_SIZE = 10;
 	static final int CHAT_ROOM_CAPACITY = 10;
 	private final String name;
+	//channels is based on CHMs where size() method cannot be used for control-flow
+	private int size;
 	private final ChannelGroup channels = new DefaultChannelGroup(GlobalEventExecutor.INSTANCE);
 	private final Queue<String> lastMessages = Queues.synchronizedQueue(EvictingQueue.create(CHAT_HISTORY_SIZE));
 
@@ -201,8 +196,11 @@ final class Chat {
 	}
 
 	boolean join(Channel channel) {
-		if (channels.size() >= CHAT_ROOM_CAPACITY) {
-			return false;
+		synchronized (this){
+			if (size >= CHAT_ROOM_CAPACITY){
+				return false;
+			}
+			size++;
 		}
 		channel.attr(TelnetServerHandler.CHAT_NAME).set(name);
 		// see javadoc to Queues.synchronizedQueue
@@ -217,6 +215,9 @@ final class Chat {
 
 	void leave(Channel channel) {
 		channels.remove(channel);
+		synchronized (this){
+			size--;
+		}
 	}
 
 	String listAllUsers() {
