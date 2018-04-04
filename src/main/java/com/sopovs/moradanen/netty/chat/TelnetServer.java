@@ -42,7 +42,7 @@ import io.netty.util.internal.ThreadLocalRandom;
 
 public final class TelnetServer {
 
-	static final int PORT = 4567;
+	private static final int PORT = 4567;
 
 	public static void main(String[] args) throws Exception {
 		EventLoopGroup bossGroup = new NioEventLoopGroup(1);
@@ -62,8 +62,8 @@ public final class TelnetServer {
 final class TelnetServerHandler extends SimpleChannelInboundHandler<String> {
 	static final String WRONG_PASSWORD_MESSAGE = "Wrong password!";
 	static final String CHAT_IS_FULL_MESSAGE = "Chat is full!";
-	static final String LOGIN_MESSAGE = "Please login!";
-	static final String JOIN_CHAT_MESSAGE = "Please join some chat!";
+	private static final String LOGIN_MESSAGE = "Please login!";
+	private static final String JOIN_CHAT_MESSAGE = "Please join some chat!";
 	static final AttributeKey<String> USER_NAME = AttributeKey.valueOf("username");
 	static final AttributeKey<String> CHAT_NAME = AttributeKey.valueOf("chatname");
 
@@ -158,12 +158,12 @@ final class User {
 	private final byte[] salt = new byte[16];
 	private final byte[] passwordHash;
 
-	public User(String password) {
+	User(String password) {
 		ThreadLocalRandom.current().nextBytes(salt);
 		passwordHash = hash(password);
 	}
 
-	public boolean validPassword(String password) {
+	boolean validPassword(String password) {
 		byte[] attemptHash = hash(password);
 		// possible timing attack?
 		return Arrays.equals(passwordHash, attemptHash);
@@ -183,16 +183,16 @@ final class User {
 
 final class Chat {
 	private static final int CHAT_HISTORY_SIZE = 10;
-	private static final int CHAT_ROOM_CAPACITY = 10;
-	final String name;
-	final ChannelGroup channels = new DefaultChannelGroup(GlobalEventExecutor.INSTANCE);
-	final Queue<String> lastMessages = Queues.synchronizedQueue(EvictingQueue.create(CHAT_HISTORY_SIZE));
+	static final int CHAT_ROOM_CAPACITY = 10;
+	private final String name;
+	private final ChannelGroup channels = new DefaultChannelGroup(GlobalEventExecutor.INSTANCE);
+	private final Queue<String> lastMessages = Queues.synchronizedQueue(EvictingQueue.create(CHAT_HISTORY_SIZE));
 
-	public Chat(String name) {
+	Chat(String name) {
 		this.name = name;
 	}
 
-	public void sendMessage(String username, String message) {
+	void sendMessage(String username, String message) {
 		String messageWithAuthor = "[" + username + "]: " + message + "\n";
 		synchronized (lastMessages) {
 			channels.writeAndFlush(messageWithAuthor);
@@ -200,7 +200,7 @@ final class Chat {
 		}
 	}
 
-	public boolean join(Channel channel) {
+	boolean join(Channel channel) {
 		if (channels.size() >= CHAT_ROOM_CAPACITY) {
 			return false;
 		}
@@ -215,11 +215,11 @@ final class Chat {
 		return true;
 	}
 
-	public void leave(Channel channel) {
+	void leave(Channel channel) {
 		channels.remove(channel);
 	}
 
-	public String listAllUsers() {
+	String listAllUsers() {
 		return channels.stream().map(c -> c.attr(TelnetServerHandler.USER_NAME).get()).collect(Collectors.joining(", "))
 				+ "\n";
 	}
